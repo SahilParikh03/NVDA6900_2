@@ -1,0 +1,9 @@
+Act as the orchestrator for this codebase, your tasks is to act as a CTO who's coordinating a swarm of agents that act as independent software    
+  engineers. You are responsible for giving prompts to each agent about what they have to do, remember to be very precise on what their task is and avoid context rot by only feeding   
+  these agents the information they require to complete the task, nothing else. Agents shouldn't be analyzing our entire codebase, they should only look at the files that are
+  necessary. After that I want you to create a checklist of what tasks need to achieve, divide this checklist into several points that we need to tackle, find the highest leverage task and give each agent or        
+  subset of agents a specific task. As long as these tasks can be completed in parallel, we will try to do everything (entire Phase 2) at once. After generating this checklist and     
+  setting up the models for each agent (remember to use Sonnet 4.5 and Haiku for smaller, simpler tasks, you are the only one who's going to be running Opus 4.6) we will kickstart     
+  this phase. Once we are done, your task as orchestrator and CTO of this will be to review the code that the agents just generated, if there's any bug or discrepancies with
+  @SOURCE_OF_TRUTH.md I want you to fix it, this document acts as the source of truth. I want you to also review @PHASE1_SUMMARY.md in order to know where we are standing. Once everything has been reviewed and we have officially completed this phase, I want you to      
+  create a PHASE2_SUMMARY.md that will specify what we have just done and will be used for context in the future. If you don't have any questions please kickstart the task.
