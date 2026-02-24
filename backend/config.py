@@ -32,6 +32,10 @@ class Settings(BaseSettings):
         default="https://financialmodelingprep.com/api",
         description="Base URL for FMP API",
     )
+    socialdata_api_key: str = Field(
+        default="",
+        description="SocialData.tools API key for Twitter search",
+    )
 
     # Financial Constants
     risk_free_rate: float = Field(
@@ -66,6 +70,16 @@ class Settings(BaseSettings):
         default=86400,
         ge=1,
         description="Cache TTL for hyperscaler data in seconds",
+    )
+    cache_ttl_social: int = Field(
+        default=60,
+        ge=1,
+        description="Cache TTL for social media data in seconds",
+    )
+    cache_ttl_polymarket: int = Field(
+        default=30,
+        ge=1,
+        description="Cache TTL for Polymarket data in seconds",
     )
 
     # Application Constants

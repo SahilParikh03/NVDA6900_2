@@ -13,7 +13,7 @@ A single-page web dashboard — the "NVDA Earnings War Room" — that consolidat
 ### Core Philosophy
 
 - **MVP first.** Ship something useful fast. Polish later.
-- **Single data provider.** All market data comes from Financial Modeling Prep (FMP). One API key, one rate limit, one billing relationship.
+- **Multi-source data layer.** Primary market data from Financial Modeling Prep (FMP) via their `/stable/` API. Prediction market data from Polymarket (no auth required). Social sentiment from SocialData.tools Twitter/X search API. All three are fetched by the Python backend — the frontend never calls external APIs directly.
 - **Derived metrics via Python.** We don't pay for expensive GEX or sentiment APIs. We pull raw data from FMP and compute the "pro" metrics ourselves using Python (Black-Scholes, NLP keyword analysis, CapEx ratios).
 - **Guide, not oracle.** This dashboard is a decision-support tool. Users are explicitly told that data may be delayed and should always verify with their own brokers/providers.
 
@@ -22,45 +22,71 @@ A single-page web dashboard — the "NVDA Earnings War Room" — that consolidat
 A single-page dashboard with the following panels:
 
 1. **NVDA Live Price** — Current price, daily change, mini-chart
-2. **GEX (Gamma Exposure) Heatmap** — Bar chart of gamma by strike, showing the "gamma flip" level and volatility triggers
-3. **Unusual Options Activity Scanner** — Table of strikes with abnormal volume/OI ratios
+2. **Polymarket Probability Heatmap** — Bar chart of implied probabilities by strike price from Polymarket binary prediction markets, showing max conviction, 50% expected level, and low conviction zones (replaces the original GEX Heatmap since FMP dropped options chain data)
+3. **Supplementary Prediction Markets** — Non-price-level NVDA markets from Polymarket (earnings beat/miss, revenue targets, etc.)
 4. **Earnings Consensus** — EPS estimates, revenue estimates, historical beat/miss record
-5. **Sentiment Engine** — Aggregated social/news sentiment with rate-of-change and mention volume
+5. **Sentiment Engine** — Twitter/X sentiment via SocialData.tools with keyword-based polarity scoring, engagement-weighted aggregation, rate-of-change, and mention volume spike detection
 6. **Hyperscaler CapEx Proxy Indicator** — Bar chart of CapEx-to-Revenue ratios for MSFT, AMZN, GOOGL, META, plus an "AI Keyword Score" from earnings transcripts
-7. **Predictions Panel** — Claude-driven synthesis combining price action, sentiment trends, and options positioning into a qualitative outlook
+7. **Predictions Panel** — Rule-based synthesis combining price action, Polymarket positioning, and Twitter/X sentiment trends into a qualitative outlook
 
 ---
 
 ## 2. DATA SOURCE
 
-### Provider: Financial Modeling Prep (FMP)
+### Provider 1: Financial Modeling Prep (FMP)
 
 - **Plan:** Starter ($19/month)
-- **API Base URL:** `https://financialmodelingprep.com/api/v3/` (and `/v4/` for some endpoints)
+- **API Base URL:** `https://financialmodelingprep.com/stable/` (migrated from legacy `/api/v3/` and `/api/v4/` — deprecated August 2025)
 - **Authentication:** Query parameter `?apikey=YOUR_API_KEY`
-- **Rate Limits:** Check the plan's limits. During earnings, we'll be polling aggressively. Implement caching to avoid hitting limits.
-- **Real-time quotes:** The Starter plan includes real-time quotes via REST. WebSockets may require a higher tier. A 1-second refresh interval via REST is sufficient for this use case.
+- **Rate Limits:** Exponential backoff on 429 responses, max 3 retries.
 
-### FMP Endpoints We Use
+#### Active FMP Endpoints
 
 | Endpoint | Purpose | Refresh Frequency |
 |----------|---------|-------------------|
-| `/quote/NVDA` | Real-time price, change, volume | Every 5 seconds during market hours |
-| `/stock_market/actives` | Market context | Every 5 minutes |
-| `/analyst-estimates/NVDA` | EPS and revenue consensus | Daily |
-| `/earnings-surprises/NVDA` | Historical beat/miss record | Daily |
-| `/earning_calendar` | Next earnings date | Daily |
-| `/stock-price-change/NVDA` | Price performance periods | Every 5 minutes |
-| `/historical-price-full/NVDA` | OHLCV for charting | Every 1 minute during market hours |
-| `/stock/full/real-time-price/NVDA` | Intraday tick data | Every 5 seconds |
-| `/stock_news?tickers=NVDA` | News articles | Every 5 minutes |
-| `/social-sentiments?symbol=NVDA` (v4) | Social sentiment scores | Every 15 minutes |
-| `/stock/NVDA/options/chain` (or equivalent) | Full options chain (all expirations) | Every 1 minute during market hours |
-| `/cash-flow-statement/MSFT` | Hyperscaler CapEx (repeat for AMZN, GOOGL, META) | Daily (data is quarterly) |
-| `/earning_call_transcript/NVDA` | NVDA earnings call transcripts | After each earnings |
-| `/earning_call_transcript/MSFT` | Hyperscaler transcripts (repeat for AMZN, GOOGL, META) | After each earnings |
+| `/stable/quote?symbol=NVDA` | Real-time price, change, volume | Every 5 seconds |
+| `/stable/historical-price-eod/full?symbol=NVDA` | OHLCV for charting | On demand |
+| `/stable/stock-price-change?symbol=NVDA` | Price performance periods | On demand |
+| `/stable/news/stock?symbol=NVDA` | News articles | On demand |
+| `/stable/cash-flow-statement?symbol=X` | Hyperscaler CapEx (MSFT, AMZN, GOOGL, META) | Daily |
+| `/stable/income-statement?symbol=X` | Hyperscaler revenue | Daily |
+| `/stable/analyst-estimates?symbol=NVDA` | EPS/revenue consensus (annual only) | Daily |
+| `/stable/earnings-calendar` | Next earnings date | Daily |
 
-> **IMPORTANT:** Verify each endpoint exists and returns data on the Starter plan before building against it. FMP sometimes gates endpoints behind higher plans. If an endpoint is unavailable, flag it immediately — do not silently skip it.
+#### Deprecated / Unavailable FMP Endpoints
+
+| Former Endpoint | Status | Replacement |
+|-----------------|--------|-------------|
+| `/v3/stock/NVDA/options/chain` | Removed entirely | Polymarket probability heatmap |
+| `/v4/social-sentiments?symbol=NVDA` | Removed | SocialData.tools Twitter/X search |
+| `/v3/earnings-surprises/NVDA` | 404 on stable API | None (signal removed from predictions) |
+| `/v3/earning_call_transcript/NVDA` | 402 (requires higher plan) | Stub returns None; engine exists but cannot be fed live data |
+| `/v3/analyst-estimates (quarterly)` | 402 (requires higher plan) | Annual estimates only |
+
+### Provider 2: Polymarket (Prediction Markets)
+
+- **APIs:** Gamma API (`https://gamma-api.polymarket.com`) + CLOB API (`https://clob.polymarket.com`)
+- **Authentication:** None required (public read-only APIs)
+- **Usage:** Replaces the options chain / GEX heatmap. Binary YES/NO prediction markets for NVDA provide strike-level implied probabilities.
+
+| Endpoint | Purpose | Refresh Frequency |
+|----------|---------|-------------------|
+| `GET /markets?_q=NVDA` (Gamma API) | Market discovery — search for NVDA markets | Every 30 seconds |
+| `GET /midpoint?token_id=X` (CLOB API) | Real-time midpoint price for an outcome token | On demand |
+| `GET /book?token_id=X` (CLOB API) | Order book depth for liquidity analysis | On demand |
+
+### Provider 3: SocialData.tools (Twitter/X Search)
+
+- **API Base URL:** `https://api.socialdata.tools`
+- **Authentication:** Bearer token in Authorization header
+- **Rate Limits:** 120 requests/minute
+- **Usage:** Replaces FMP social sentiment. Searches Twitter/X for `$NVDA` tweets every 60 seconds.
+
+| Endpoint | Purpose | Refresh Frequency |
+|----------|---------|-------------------|
+| `GET /twitter/search?query=$NVDA` | Latest tweets mentioning $NVDA | Every 60 seconds |
+
+> **IMPORTANT:** FMP legacy endpoints (`/api/v3/`, `/api/v4/`) were deprecated in August 2025. All active FMP endpoints now use the `/stable/` base URL. The options chain endpoint was removed entirely — Polymarket is the replacement.
 
 ---
 
@@ -447,6 +473,9 @@ CACHE_TTL_OPTIONS=60
 CACHE_TTL_SENTIMENT=900
 CACHE_TTL_EARNINGS=86400
 CACHE_TTL_HYPERSCALER=86400
+SOCIALDATA_API_KEY=your_socialdata_api_key_here
+CACHE_TTL_SOCIAL=60
+CACHE_TTL_POLYMARKET=30
 
 # Frontend
 VITE_API_BASE_URL=http://localhost:8000/api
@@ -477,18 +506,23 @@ VITE_API_BASE_URL=http://localhost:8000/api
 | **CapEx** | Capital Expenditure — money spent on infrastructure; hyperscaler CapEx is a leading indicator of GPU demand |
 | **FMP** | Financial Modeling Prep — our sole market data provider |
 | **Hyperscaler** | Large cloud providers (MSFT, AMZN, GOOGL, META) who are NVDA's biggest data center customers |
+| **Polymarket** | Decentralized prediction market platform. Binary YES/NO markets provide implied probabilities for NVDA price levels |
+| **SocialData.tools** | Third-party API providing Twitter/X search access. Used for social sentiment analysis |
+| **Probability Heatmap** | Visual representation of implied probabilities at different NVDA price strikes, derived from Polymarket prediction markets |
 
 ---
 
-## 10. OPEN QUESTIONS (Flag if encountered)
+## 10. RESOLVED QUESTIONS (Phase 1–2.5)
 
-- Does the FMP Starter plan actually include the options chain endpoint? (Validate in Phase 1)
-- Does FMP provide implied volatility per contract, or do we need to calculate it? (Validate in Phase 1)
-- What is the exact rate limit on the Starter plan? (Document in Phase 1)
-- Does the social sentiment endpoint return NVDA-specific data or just general market sentiment? (Validate in Phase 1)
-- Are earnings call transcripts full-text or summary-only on the Starter plan? (Validate in Phase 1)
+- **Options chain:** FMP dropped this endpoint entirely from the stable API. **Resolution:** Replaced with Polymarket probability heatmap.
+- **Social sentiment:** FMP removed the `/v4/social-sentiments` endpoint. **Resolution:** Replaced with SocialData.tools Twitter/X search.
+- **Earnings surprises:** FMP returns 404 for per-symbol surprises on stable API. **Resolution:** Signal removed from predictions engine.
+- **Earnings transcripts:** FMP returns 402 (requires higher plan). **Resolution:** Engine exists but runs with empty data. Upgrade FMP plan or find alternative provider to enable.
+- **Quarterly analyst estimates:** FMP returns 402. **Resolution:** Annual estimates only.
+- **Rate limits:** FMP stable API returns 429 on rate limit. Backend implements exponential backoff with 3 retries.
+- **Implied volatility:** FMP did provide IV per contract, but options chain is now unavailable. Bisection method in gex_engine.py exists but has no live data feed.
 
 ---
 
-*Last updated: February 23, 2026*
-*Version: 1.0 — MVP*
+*Last updated: February 24, 2026*
+*Version: 1.1 — Post-Data-Migration*

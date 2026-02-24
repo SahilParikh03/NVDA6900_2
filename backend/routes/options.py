@@ -1,17 +1,17 @@
 """
-Options routes for the NVDA Earnings War Room.
+Options / Polymarket routes for the NVDA Earnings War Room.
 
 Endpoints:
-  GET /api/options/gex      — Gamma Exposure calculation across all strikes
-  GET /api/options/unusual  — Unusual options activity scan
+  GET /api/options/heatmap       — Polymarket probability heatmap (replaces GEX)
+  GET /api/options/supplementary — Non-price-level NVDA prediction markets
 
-Both endpoints resolve the options chain from the in-memory cache first and
-fall back to FMP when the cache is cold.  The current NVDA spot price
-required by the GEX engine is resolved the same way.
+After FMP dropped options chain data entirely, Polymarket binary prediction
+markets serve as the replacement data source for the GEX Heatmap panel.
+The heatmap endpoint returns strike-level implied probabilities, key conviction
+levels, and aggregate market data.
 
 All endpoints degrade gracefully: a 503 is returned when data cannot be
-obtained from either source.  Calculation errors inside the engines are also
-caught and surfaced as 503s so the rest of the dashboard keeps working.
+obtained from either source.
 """
 
 import logging
@@ -20,8 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from backend.cache import cache
 from backend.config import settings
-from backend.engines.gex_engine import calculate_gex
-from backend.engines.unusual_activity import scan_unusual_activity
+from backend.engines.polymarket_engine import analyze_polymarket
 
 logger = logging.getLogger(__name__)
 
@@ -34,160 +33,110 @@ _TICKER: str = "NVDA"
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-async def _get_options_chain(request: Request) -> list[dict] | None:
+async def _get_polymarket_data(request: Request) -> list[dict] | None:
     """
-    Resolve the NVDA options chain, preferring the in-memory cache.
+    Resolve Polymarket NVDA markets, preferring the in-memory cache.
 
-    Returns the raw FMP options chain list, or None when no data is available
-    from either source.
+    Returns the raw list of market dicts, or None when no data is available.
     """
-    cached = await cache.get(f"options:{_TICKER}")
+    cached = await cache.get(f"polymarket:{_TICKER}")
     if cached is not None:
-        logger.debug("Options chain cache hit for %s", _TICKER)
+        logger.debug("Polymarket cache hit for %s", _TICKER)
         return cached
 
-    logger.debug("Options chain cache miss for %s — fetching from FMP", _TICKER)
-    client = request.app.state.fmp_client
+    logger.debug("Polymarket cache miss for %s — fetching from API", _TICKER)
+    client = request.app.state.polymarket_client
 
     try:
-        chain = await client.get_options_chain(_TICKER)
+        markets = await client.search_markets(_TICKER)
     except Exception:
-        logger.exception("Unexpected error fetching options chain for %s", _TICKER)
+        logger.exception("Unexpected error fetching Polymarket markets for %s", _TICKER)
         return None
 
-    if chain is not None:
-        await cache.set(f"options:{_TICKER}", chain, ttl=settings.cache_ttl_options)
+    if markets is not None:
+        await cache.set(f"polymarket:{_TICKER}", markets, ttl=settings.cache_ttl_polymarket)
 
-    return chain
-
-
-async def _get_current_price(request: Request) -> float | None:
-    """
-    Resolve the current NVDA spot price, preferring the in-memory cache.
-
-    Extracts ``quote[0]["price"]`` from the cached or freshly-fetched quote.
-    Returns None when no price is obtainable.
-    """
-    cached = await cache.get(f"price:{_TICKER}")
-    quote: list[dict] | None = cached
-
-    if quote is None:
-        logger.debug("Price cache miss for %s — fetching from FMP for options route", _TICKER)
-        client = request.app.state.fmp_client
-        try:
-            quote = await client.get_quote(_TICKER)
-        except Exception:
-            logger.exception("Unexpected error fetching quote for %s (options route)", _TICKER)
-            return None
-
-        if quote is not None:
-            await cache.set(f"price:{_TICKER}", quote, ttl=settings.cache_ttl_price)
-
-    if not quote or not isinstance(quote, list) or len(quote) == 0:
-        logger.error("Could not resolve price for %s — quote is empty or invalid", _TICKER)
-        return None
-
-    price_raw = quote[0].get("price")
-    if price_raw is None:
-        logger.error("Quote for %s has no 'price' field: %r", _TICKER, quote[0])
-        return None
-
-    try:
-        price = float(price_raw)
-    except (TypeError, ValueError):
-        logger.error("Non-numeric price in quote for %s: %r", _TICKER, price_raw)
-        return None
-
-    if price <= 0:
-        logger.error("Non-positive price for %s: %.4f", _TICKER, price)
-        return None
-
-    return price
+    return markets
 
 
 # ---------------------------------------------------------------------------
-# GET /gex
+# GET /heatmap — Polymarket probability heatmap (replaces GEX)
 # ---------------------------------------------------------------------------
 
-@router.get("/gex", summary="Gamma Exposure (GEX) across all NVDA option strikes")
-async def get_gex(request: Request) -> dict:
+@router.get("/heatmap", summary="Polymarket probability heatmap for NVDA price levels")
+async def get_heatmap(request: Request) -> dict:
     """
-    Compute Gamma Exposure for every live NVDA option strike.
+    Return a probability heatmap derived from Polymarket prediction markets.
+
+    This replaces the former GEX (Gamma Exposure) endpoint. Instead of
+    options-derived gamma, it returns:
+      - Per-strike implied probabilities from binary YES/NO markets
+      - Key conviction levels (max, 50%, low)
+      - Supplementary non-price-level markets (earnings beat/miss, etc.)
+      - Aggregate volume and market count
 
     Resolution:
-      1. Options chain — from ``cache.get("options:NVDA")`` or FMP fallback.
-      2. Spot price    — from ``cache.get("price:NVDA")``  or FMP fallback,
-                         extracted as ``quote[0]["price"]``.
-      3. Both are passed to ``calculate_gex(chain, price)``; the resulting
-         ``GexResult`` is serialised via ``.model_dump()`` and returned.
+      1. Raw market data from in-memory cache (key ``polymarket:NVDA``).
+      2. Polymarket Gamma API via the shared PolymarketClient.
+      3. Raw data passed to ``analyze_polymarket()`` from the engine.
 
     Raises:
-        HTTPException(503): When the options chain or price cannot be obtained,
-                            or when the engine raises an unexpected exception.
+        HTTPException(503): When data cannot be obtained or engine fails.
     """
-    chain = await _get_options_chain(request)
-    if chain is None:
-        logger.error("GEX endpoint: options chain unavailable for %s", _TICKER)
+    markets = await _get_polymarket_data(request)
+    if markets is None:
+        logger.error("Heatmap endpoint: Polymarket data unavailable for %s", _TICKER)
         raise HTTPException(
             status_code=503,
-            detail="Options chain data temporarily unavailable. Please retry shortly.",
-        )
-
-    price = await _get_current_price(request)
-    if price is None:
-        logger.error("GEX endpoint: current price unavailable for %s", _TICKER)
-        raise HTTPException(
-            status_code=503,
-            detail="Current price data temporarily unavailable. Please retry shortly.",
+            detail="Polymarket data temporarily unavailable. Please retry shortly.",
         )
 
     try:
-        result = await calculate_gex(chain, price)
+        result = await analyze_polymarket(markets)
     except Exception:
-        logger.exception("GEX engine raised an unexpected exception for %s", _TICKER)
+        logger.exception("Polymarket engine raised an unexpected exception for %s", _TICKER)
         raise HTTPException(
             status_code=503,
-            detail="GEX calculation failed. Please retry shortly.",
+            detail="Polymarket analysis failed. Please retry shortly.",
         )
 
     return result.model_dump()
 
 
 # ---------------------------------------------------------------------------
-# GET /unusual
+# GET /supplementary — non-price NVDA prediction markets
 # ---------------------------------------------------------------------------
 
-@router.get("/unusual", summary="Unusual options activity for NVDA")
-async def get_unusual_activity(request: Request) -> dict:
+@router.get("/supplementary", summary="Supplementary NVDA prediction markets")
+async def get_supplementary(request: Request) -> dict:
     """
-    Scan the NVDA options chain for contracts with abnormally high volume/OI.
+    Return non-price-level NVDA prediction markets (earnings beat/miss, etc.).
 
-    Resolution:
-      1. Options chain — from ``cache.get("options:NVDA")`` or FMP fallback.
-      2. Passed to ``scan_unusual_activity(chain)``; the resulting
-         ``UnusualActivityResult`` is serialised via ``.model_dump()``.
+    This is a convenience endpoint that extracts only the supplementary
+    markets from the full Polymarket analysis.
 
     Raises:
-        HTTPException(503): When the options chain cannot be obtained, or when
-                            the engine raises an unexpected exception.
+        HTTPException(503): When data cannot be obtained or engine fails.
     """
-    chain = await _get_options_chain(request)
-    if chain is None:
-        logger.error("Unusual activity endpoint: options chain unavailable for %s", _TICKER)
+    markets = await _get_polymarket_data(request)
+    if markets is None:
+        logger.error("Supplementary endpoint: Polymarket data unavailable for %s", _TICKER)
         raise HTTPException(
             status_code=503,
-            detail="Options chain data temporarily unavailable. Please retry shortly.",
+            detail="Polymarket data temporarily unavailable. Please retry shortly.",
         )
 
     try:
-        result = await scan_unusual_activity(chain)
+        result = await analyze_polymarket(markets)
     except Exception:
-        logger.exception(
-            "Unusual activity engine raised an unexpected exception for %s", _TICKER
-        )
+        logger.exception("Polymarket engine raised an unexpected exception for %s", _TICKER)
         raise HTTPException(
             status_code=503,
-            detail="Unusual activity scan failed. Please retry shortly.",
+            detail="Polymarket analysis failed. Please retry shortly.",
         )
 
-    return result.model_dump()
+    return {
+        "supplementary": [m.model_dump() for m in result.supplementary],
+        "market_count": result.market_count,
+        "last_updated": result.last_updated,
+    }

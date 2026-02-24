@@ -2,7 +2,8 @@
 FastAPI application entry point for the NVDA Earnings War Room.
 
 Wires together all application components: CORS middleware, route registration,
-FMP client, in-memory cache, and the background data refresh scheduler.
+FMP client, Polymarket client, SocialData client, in-memory cache, and the
+background data refresh scheduler.
 """
 
 import logging
@@ -15,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.config import settings
 from backend.cache import cache
 from backend.fmp_client import FMPClient
+from backend.polymarket_client import PolymarketClient
+from backend.socialdata_client import SocialDataClient
 from backend.scheduler import init_scheduler
 
 # ---------------------------------------------------------------------------
@@ -38,15 +41,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     Startup sequence:
       1. Create FMPClient and store on ``app.state``.
-      2. Initialise and store the DataRefreshScheduler on ``app.state``.
-      3. Start the scheduler so background refresh tasks begin immediately.
-      4. Log that the application is ready to serve requests.
+      2. Create PolymarketClient and store on ``app.state``.
+      3. Create SocialDataClient and store on ``app.state``.
+      4. Initialise and store the DataRefreshScheduler on ``app.state``.
+      5. Start the scheduler so background refresh tasks begin immediately.
+      6. Log that the application is ready to serve requests.
 
     Shutdown sequence:
       1. Stop the scheduler, cancelling all background tasks.
-      2. Close the FMPClient (drains the underlying httpx connection pool).
-      3. Clear the in-memory cache.
-      4. Log that the application has shut down.
+      2. Close the PolymarketClient.
+      3. Close the SocialDataClient.
+      4. Close the FMPClient (drains the underlying httpx connection pool).
+      5. Clear the in-memory cache.
+      6. Log that the application has shut down.
     """
     # ------------------------------------------------------------------
     # STARTUP
@@ -56,7 +63,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     fmp_client: FMPClient = FMPClient()
     app.state.fmp_client = fmp_client
 
-    scheduler = init_scheduler(fmp_client)
+    polymarket_client: PolymarketClient = PolymarketClient()
+    app.state.polymarket_client = polymarket_client
+
+    socialdata_client: SocialDataClient = SocialDataClient()
+    app.state.socialdata_client = socialdata_client
+
+    scheduler = init_scheduler(fmp_client, polymarket_client, socialdata_client)
     app.state.scheduler = scheduler
 
     await scheduler.start()
@@ -71,6 +84,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down NVDA Earnings War Room …")
 
     await scheduler.stop()
+    await polymarket_client.close()
+    await socialdata_client.close()
     await fmp_client.close()
     await cache.clear()
 

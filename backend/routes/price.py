@@ -2,9 +2,10 @@
 Price routes for the NVDA Earnings War Room.
 
 Endpoints:
-  GET /api/price/         — Current NVDA quote (cache-first, FMP fallback)
-  GET /api/price/history  — Historical OHLCV data (direct FMP call)
-  GET /api/price/change   — Price performance across multiple periods (direct FMP call)
+  GET /api/price/            — Current NVDA quote (cache-first, FMP fallback)
+  GET /api/price/history     — Historical OHLCV data (direct FMP call)
+  GET /api/price/change      — Price performance across multiple periods (direct FMP call)
+  GET /api/price/correlated  — Batch quotes for correlated tickers (cache-first, FMP fallback)
 
 All endpoints degrade gracefully: a 503 is returned when both the cache and
 the FMP API are unable to supply data. The application never crashes on a
@@ -12,6 +13,7 @@ missing or malformed response.
 """
 
 import logging
+from typing import List
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -24,6 +26,11 @@ router = APIRouter()
 
 # Ticker is always NVDA for this project.
 _TICKER: str = "NVDA"
+
+# Correlated tickers tracked alongside NVDA
+_CORRELATED_SYMBOLS: List[str] = [
+    "GOOGL", "MSFT", "AAPL", "AMZN", "META", "AMD", "INTC", "TSM",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +110,11 @@ async def get_price_history(request: Request) -> dict:
             detail="Historical price data temporarily unavailable. Please retry shortly.",
         )
 
+    # FMP stable API returns a flat list of OHLCV records.  The frontend
+    # expects ``{ symbol, historical }`` so we wrap the list here.
+    if isinstance(history, list):
+        return {"symbol": _TICKER, "historical": history}
+
     return history
 
 
@@ -141,3 +153,52 @@ async def get_price_change(request: Request) -> dict:
         return {"data": change_data[0]}
 
     return {"data": change_data}
+
+
+# ---------------------------------------------------------------------------
+# GET /correlated — batch quotes for correlated tickers
+# ---------------------------------------------------------------------------
+
+_CORRELATED_CACHE_KEY: str = "price:correlated"
+
+@router.get("/correlated", summary="Batch quotes for correlated tickers")
+async def get_correlated_prices(request: Request) -> dict:
+    """
+    Return current quote data for all correlated tickers in a single call.
+
+    Resolution order:
+      1. In-memory cache (key ``price:correlated``).
+      2. FMP batch quote via the shared FMP client.
+
+    Returns a dict mapping each symbol to its FMP quote object.
+
+    Raises:
+        HTTPException(503): When both the cache and FMP return no data.
+    """
+    cached = await cache.get(_CORRELATED_CACHE_KEY)
+    if cached is not None:
+        logger.debug("Correlated prices cache hit")
+        return {"source": "cache", "data": cached}
+
+    logger.debug("Correlated prices cache miss — fetching from FMP")
+    client = request.app.state.fmp_client
+
+    try:
+        quotes = await client.get_quotes(_CORRELATED_SYMBOLS)
+    except Exception:
+        logger.exception("Unexpected error fetching correlated quotes")
+        quotes = None
+
+    if not quotes:
+        logger.error("Correlated prices unavailable — FMP returned None")
+        raise HTTPException(
+            status_code=503,
+            detail="Correlated price data temporarily unavailable. Please retry shortly.",
+        )
+
+    # Index by symbol for fast frontend lookup
+    by_symbol = {q["symbol"]: q for q in quotes if "symbol" in q}
+
+    await cache.set(_CORRELATED_CACHE_KEY, by_symbol, ttl=settings.cache_ttl_price)
+
+    return {"source": "fmp", "data": by_symbol}

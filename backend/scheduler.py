@@ -1,18 +1,20 @@
 """
 Background scheduler for periodic data refresh tasks.
 
-Implements scheduled jobs that refresh cached data by calling the FMP client
-and storing results in the TTL cache. Each job runs at an interval matching
-its cache TTL to ensure data freshness.
+Implements scheduled jobs that refresh cached data by calling the FMP client,
+Polymarket client, and SocialData client, storing results in the TTL cache.
+Each job runs at an interval matching its cache TTL to ensure data freshness.
 """
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from backend.cache import cache
 from backend.config import settings
 from backend.fmp_client import FMPClient
+from backend.polymarket_client import PolymarketClient
+from backend.socialdata_client import SocialDataClient
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +23,28 @@ class DataRefreshScheduler:
     """
     Scheduler for periodic background data refresh tasks.
 
-    Each refresh task fetches data via FMP client and stores it in the cache.
-    Tasks run at intervals matching their cache TTLs to maintain freshness.
+    Each refresh task fetches data via the appropriate client and stores it in
+    the cache. Tasks run at intervals matching their cache TTLs to maintain
+    freshness.
     """
 
-    def __init__(self, fmp_client: FMPClient) -> None:
+    def __init__(
+        self,
+        fmp_client: FMPClient,
+        polymarket_client: PolymarketClient,
+        socialdata_client: SocialDataClient,
+    ) -> None:
         """
         Initialize the scheduler.
 
         Args:
             fmp_client: FMP client instance for fetching market data
+            polymarket_client: Polymarket client for prediction market data
+            socialdata_client: SocialData client for Twitter/X sentiment data
         """
         self.fmp_client = fmp_client
+        self.polymarket_client = polymarket_client
+        self.socialdata_client = socialdata_client
         self._tasks: List[asyncio.Task] = []
         self._running = False
 
@@ -53,14 +65,19 @@ class DataRefreshScheduler:
                 "prices"
             )),
             asyncio.create_task(self._run_periodic_task(
-                self._refresh_options,
-                settings.cache_ttl_options,
-                "options"
+                self._refresh_correlated_prices,
+                settings.cache_ttl_price,
+                "correlated_prices"
             )),
             asyncio.create_task(self._run_periodic_task(
-                self._refresh_sentiment,
-                settings.cache_ttl_sentiment,
-                "sentiment"
+                self._refresh_polymarket,
+                settings.cache_ttl_polymarket,
+                "polymarket"
+            )),
+            asyncio.create_task(self._run_periodic_task(
+                self._refresh_social_sentiment,
+                settings.cache_ttl_social,
+                "social_sentiment"
             )),
             asyncio.create_task(self._run_periodic_task(
                 self._refresh_earnings,
@@ -75,12 +92,12 @@ class DataRefreshScheduler:
         ]
 
         logger.info(
-            "Scheduler started with %d tasks: prices(%ds), options(%ds), "
-            "sentiment(%ds), earnings(%ds), hyperscaler(%ds)",
+            "Scheduler started with %d tasks: prices(%ds), polymarket(%ds), "
+            "social_sentiment(%ds), earnings(%ds), hyperscaler(%ds)",
             len(self._tasks),
             settings.cache_ttl_price,
-            settings.cache_ttl_options,
-            settings.cache_ttl_sentiment,
+            settings.cache_ttl_polymarket,
+            settings.cache_ttl_social,
             settings.cache_ttl_earnings,
             settings.cache_ttl_hyperscaler,
         )
@@ -118,7 +135,7 @@ class DataRefreshScheduler:
             interval_seconds: Interval between executions in seconds
             task_name: Name of the task for logging
         """
-        logger.info("Starting periodic task '%s' with interval %ds", task_name, interval_seconds)
+        logger.info("Starting periodic task with interval %ds", interval_seconds)
 
         while self._running:
             try:
@@ -126,8 +143,7 @@ class DataRefreshScheduler:
             except Exception as e:
                 # Log error but continue running - graceful degradation
                 logger.error(
-                    "Error in periodic task '%s': %s",
-                    task_name,
+                    "Error in periodic task: %s",
                     str(e),
                     exc_info=True,
                 )
@@ -136,7 +152,7 @@ class DataRefreshScheduler:
             try:
                 await asyncio.sleep(interval_seconds)
             except asyncio.CancelledError:
-                logger.info("Periodic task '%s' cancelled", task_name)
+                logger.info("Periodic task cancelled")
                 break
 
     async def _refresh_prices(self) -> None:
@@ -152,31 +168,41 @@ class DataRefreshScheduler:
         except Exception as e:
             logger.error("Failed to refresh price for %s: %s", ticker, str(e))
 
-    async def _refresh_options(self) -> None:
-        """Refresh options chain data for NVDA."""
-        logger.debug("Refreshing options data")
+    async def _refresh_correlated_prices(self) -> None:
+        """Refresh batch quotes for correlated tickers."""
+        logger.debug("Refreshing correlated prices")
 
-        ticker = "NVDA"
+        symbols = ["GOOGL", "MSFT", "AAPL", "AMZN", "META", "AMD", "INTC", "TSM"]
         try:
-            options_data = await self.fmp_client.get_options_chain(ticker)
-            if options_data:
-                await cache.set(f"options:{ticker}", options_data, ttl=settings.cache_ttl_options)
-                logger.debug("Refreshed options for %s: %d contracts", ticker, len(options_data))
+            quotes = await self.fmp_client.get_quotes(symbols)
+            if quotes:
+                by_symbol = {q["symbol"]: q for q in quotes if "symbol" in q}
+                await cache.set("price:correlated", by_symbol, ttl=settings.cache_ttl_price)
+                logger.debug("Refreshed correlated prices: %d symbols", len(by_symbol))
         except Exception as e:
-            logger.error("Failed to refresh options for %s: %s", ticker, str(e))
+            logger.error("Failed to refresh correlated prices: %s", str(e))
 
-    async def _refresh_sentiment(self) -> None:
-        """Refresh social sentiment data for NVDA."""
-        logger.debug("Refreshing sentiment data")
-
-        ticker = "NVDA"
+    async def _refresh_polymarket(self) -> None:
+        """Refresh Polymarket NVDA prediction market data."""
+        logger.debug("Refreshing Polymarket data")
         try:
-            sentiment_data = await self.fmp_client.get_social_sentiment(ticker)
-            if sentiment_data:
-                await cache.set(f"sentiment:{ticker}", sentiment_data, ttl=settings.cache_ttl_sentiment)
-                logger.debug("Refreshed sentiment for %s", ticker)
+            markets = await self.polymarket_client.search_markets("NVDA")
+            if markets:
+                await cache.set("polymarket:NVDA", markets, ttl=settings.cache_ttl_polymarket)
+                logger.debug("Refreshed Polymarket data: %d markets", len(markets))
         except Exception as e:
-            logger.error("Failed to refresh sentiment for %s: %s", ticker, str(e))
+            logger.error("Failed to refresh Polymarket data: %s", str(e))
+
+    async def _refresh_social_sentiment(self) -> None:
+        """Refresh Twitter/X sentiment data for NVDA via SocialData.tools."""
+        logger.debug("Refreshing social sentiment data")
+        try:
+            tweets = await self.socialdata_client.search_tweets("$NVDA")
+            if tweets:
+                await cache.set("sentiment:NVDA", tweets, ttl=settings.cache_ttl_social)
+                logger.debug("Refreshed social sentiment: %d tweets", len(tweets))
+        except Exception as e:
+            logger.error("Failed to refresh social sentiment: %s", str(e))
 
     async def _refresh_earnings(self) -> None:
         """Refresh earnings-related data for NVDA."""
@@ -195,13 +221,6 @@ class DataRefreshScheduler:
                 await cache.set("earnings:estimates:NVDA", estimates, ttl=settings.cache_ttl_earnings)
         except Exception as e:
             logger.error("Failed to refresh analyst estimates: %s", str(e))
-
-        try:
-            surprises = await self.fmp_client.get_earnings_surprises("NVDA")
-            if surprises:
-                await cache.set("earnings:surprises:NVDA", surprises, ttl=settings.cache_ttl_earnings)
-        except Exception as e:
-            logger.error("Failed to refresh earnings surprises: %s", str(e))
 
     async def _refresh_hyperscaler(self) -> None:
         """Refresh hyperscaler financial data."""
@@ -241,16 +260,22 @@ def get_scheduler() -> Optional[DataRefreshScheduler]:
     return scheduler
 
 
-def init_scheduler(fmp_client: FMPClient) -> DataRefreshScheduler:
+def init_scheduler(
+    fmp_client: FMPClient,
+    polymarket_client: PolymarketClient,
+    socialdata_client: SocialDataClient,
+) -> DataRefreshScheduler:
     """
     Initialize the global scheduler instance.
 
     Args:
         fmp_client: FMP client instance for data fetching
+        polymarket_client: Polymarket client for prediction market data
+        socialdata_client: SocialData client for Twitter/X sentiment data
 
     Returns:
         The initialized scheduler instance
     """
     global scheduler
-    scheduler = DataRefreshScheduler(fmp_client)
+    scheduler = DataRefreshScheduler(fmp_client, polymarket_client, socialdata_client)
     return scheduler

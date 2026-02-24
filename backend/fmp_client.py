@@ -3,6 +3,11 @@ FMP (Financial Modeling Prep) API client.
 
 All HTTP calls to the external FMP API route through this module.
 No other module in the project should make HTTP calls to FMP directly.
+
+NOTE (2025-08+): FMP deprecated all /api/v3/ and /api/v4/ endpoints.
+All active endpoints now route through https://financialmodelingprep.com/stable/.
+Endpoints that are unavailable on the Starter plan or have been dropped from
+the stable API keep their method signatures but return None immediately.
 """
 
 import asyncio
@@ -20,15 +25,19 @@ _MAX_RETRIES: int = 3
 _BACKOFF_BASE: float = 1.0  # seconds — doubles each retry: 1s, 2s, 4s
 _REQUEST_TIMEOUT: float = 30.0  # seconds
 
+# Fixed base for all stable endpoints — does NOT use settings.fmp_base_url
+_STABLE_BASE: str = "https://financialmodelingprep.com/stable"
+
 
 class FMPClient:
     """
     Async HTTP client for the Financial Modeling Prep API.
 
-    All public methods map 1-to-1 to a specific FMP endpoint.  Authentication
-    is handled internally — callers never need to touch the API key.  Every
-    method returns the parsed JSON payload on success or ``None`` on any
-    failure (network error, 4xx/5xx, exhausted retries after 429).
+    All public methods map 1-to-1 to a specific FMP stable endpoint.
+    Authentication is handled internally — callers never need to touch the
+    API key.  Every method returns the parsed JSON payload on success or
+    ``None`` on any failure (network error, 4xx/5xx, exhausted retries after
+    429, or endpoint unavailable on current plan).
 
     Usage::
 
@@ -40,6 +49,9 @@ class FMPClient:
     def __init__(self) -> None:
         """Initialise the underlying ``httpx.AsyncClient`` with a fixed timeout."""
         self._api_key: str = settings.fmp_api_key
+        # Kept for backward compatibility — stable URLs are fixed and do not
+        # derive from this value, but removing it would break any code that
+        # reads FMPClient._base_url externally.
         self._base_url: str = settings.fmp_base_url.rstrip("/")
         self._client: httpx.AsyncClient = httpx.AsyncClient(
             timeout=httpx.Timeout(_REQUEST_TIMEOUT),
@@ -54,7 +66,7 @@ class FMPClient:
         await self._client.aclose()
 
     # ------------------------------------------------------------------
-    # Internal helper
+    # Internal helpers
     # ------------------------------------------------------------------
 
     async def _request(
@@ -155,27 +167,19 @@ class FMPClient:
         # Should never be reached, but satisfy the type checker
         return None  # pragma: no cover
 
-    # ------------------------------------------------------------------
-    # URL builders
-    # ------------------------------------------------------------------
-
-    def _v3(self, path: str) -> str:
-        """Build a v3 endpoint URL.  ``path`` must NOT start with a slash."""
-        return f"{self._base_url}/v3/{path}"
-
-    def _v4(self, path: str) -> str:
-        """Build a v4 endpoint URL.  ``path`` must NOT start with a slash."""
-        return f"{self._base_url}/v4/{path}"
+    def _stable(self, path: str) -> str:
+        """Build a stable endpoint URL.  ``path`` must NOT start with a slash."""
+        return f"{_STABLE_BASE}/{path}"
 
     # ------------------------------------------------------------------
-    # Public API methods
+    # Public API methods — active endpoints
     # ------------------------------------------------------------------
 
     async def get_quote(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
         """
         Fetch real-time quote data for a ticker.
 
-        Endpoint: ``GET /v3/quote/{ticker}``
+        Endpoint: ``GET /stable/quote?symbol={ticker}``
 
         Returns fields such as price, change, changePercent, volume, and
         market cap.
@@ -186,83 +190,33 @@ class FMPClient:
         Returns:
             List of quote objects, or ``None`` on failure.
         """
-        url = self._v3(f"quote/{ticker}")
-        return await self._request("GET", url)
+        url = self._stable("quote")
+        params: Dict[str, Any] = {"symbol": ticker}
+        return await self._request("GET", url, params=params)
 
-    async def get_market_actives(self) -> Optional[List[Dict[str, Any]]]:
+    async def get_quotes(self, tickers: List[str]) -> Optional[List[Dict[str, Any]]]:
         """
-        Fetch the most actively traded stocks in the current session.
+        Fetch real-time quote data for multiple tickers in a single call.
 
-        Endpoint: ``GET /v3/stock_market/actives``
-
-        Returns:
-            List of active stock objects, or ``None`` on failure.
-        """
-        url = self._v3("stock_market/actives")
-        return await self._request("GET", url)
-
-    async def get_analyst_estimates(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch analyst EPS and revenue consensus estimates for a ticker.
-
-        Endpoint: ``GET /v3/analyst-estimates/{ticker}``
+        Endpoint: ``GET /stable/quote?symbol={comma_separated}``
 
         Args:
-            ticker: Stock symbol, e.g. ``"NVDA"``.
+            tickers: List of stock symbols, e.g. ``["GOOGL", "MSFT", "AAPL"]``.
 
         Returns:
-            List of estimate objects, or ``None`` on failure.
+            List of quote objects (one per ticker), or ``None`` on failure.
         """
-        url = self._v3(f"analyst-estimates/{ticker}")
-        return await self._request("GET", url)
-
-    async def get_earnings_surprises(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch historical earnings beat/miss data for a ticker.
-
-        Endpoint: ``GET /v3/earnings-surprises/{ticker}``
-
-        Args:
-            ticker: Stock symbol, e.g. ``"NVDA"``.
-
-        Returns:
-            List of earnings surprise objects, or ``None`` on failure.
-        """
-        url = self._v3(f"earnings-surprises/{ticker}")
-        return await self._request("GET", url)
-
-    async def get_earnings_calendar(self) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch the upcoming earnings calendar.
-
-        Endpoint: ``GET /v3/earning_calendar``
-
-        Returns:
-            List of calendar entries, or ``None`` on failure.
-        """
-        url = self._v3("earning_calendar")
-        return await self._request("GET", url)
-
-    async def get_stock_price_change(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch price performance across multiple time periods for a ticker.
-
-        Endpoint: ``GET /v3/stock-price-change/{ticker}``
-
-        Args:
-            ticker: Stock symbol, e.g. ``"NVDA"``.
-
-        Returns:
-            List of price-change objects, or ``None`` on failure.
-        """
-        url = self._v3(f"stock-price-change/{ticker}")
-        return await self._request("GET", url)
+        if not tickers:
+            return []
+        url = self._stable("quote")
+        params: Dict[str, Any] = {"symbol": ",".join(tickers)}
+        return await self._request("GET", url, params=params)
 
     async def get_historical_price(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
         Fetch full historical OHLCV data for charting.
 
-        Endpoint: ``GET /v3/historical-price-full/{ticker}``
+        Endpoint: ``GET /stable/historical-price-eod/full?symbol={ticker}``
 
         Args:
             ticker: Stock symbol, e.g. ``"NVDA"``.
@@ -271,23 +225,25 @@ class FMPClient:
             Dict containing ``"symbol"`` and ``"historical"`` list, or ``None``
             on failure.
         """
-        url = self._v3(f"historical-price-full/{ticker}")
-        return await self._request("GET", url)
+        url = self._stable("historical-price-eod/full")
+        params: Dict[str, Any] = {"symbol": ticker}
+        return await self._request("GET", url, params=params)
 
-    async def get_real_time_price(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
+    async def get_stock_price_change(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
         """
-        Fetch intraday real-time tick data for a ticker.
+        Fetch price performance across multiple time periods for a ticker.
 
-        Endpoint: ``GET /v3/stock/full/real-time-price/{ticker}``
+        Endpoint: ``GET /stable/stock-price-change?symbol={ticker}``
 
         Args:
             ticker: Stock symbol, e.g. ``"NVDA"``.
 
         Returns:
-            List of real-time price tick objects, or ``None`` on failure.
+            List of price-change objects, or ``None`` on failure.
         """
-        url = self._v3(f"stock/full/real-time-price/{ticker}")
-        return await self._request("GET", url)
+        url = self._stable("stock-price-change")
+        params: Dict[str, Any] = {"symbol": ticker}
+        return await self._request("GET", url, params=params)
 
     async def get_stock_news(
         self,
@@ -297,7 +253,7 @@ class FMPClient:
         """
         Fetch recent news articles for a ticker.
 
-        Endpoint: ``GET /v3/stock_news?tickers={ticker}&limit={limit}``
+        Endpoint: ``GET /stable/news/stock?symbol={ticker}&limit={limit}``
 
         Args:
             ticker: Stock symbol, e.g. ``"NVDA"``.
@@ -306,56 +262,9 @@ class FMPClient:
         Returns:
             List of news article objects, or ``None`` on failure.
         """
-        url = self._v3("stock_news")
-        params: Dict[str, Any] = {"tickers": ticker, "limit": limit}
+        url = self._stable("news/stock")
+        params: Dict[str, Any] = {"symbol": ticker, "limit": limit}
         return await self._request("GET", url, params=params)
-
-    async def get_social_sentiment(self, symbol: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch trending social sentiment data for a symbol.
-
-        Endpoint: ``GET /v4/social-sentiments?symbol={symbol}``
-
-        Note: This is a v4 endpoint.
-
-        Args:
-            symbol: Stock symbol, e.g. ``"NVDA"``.
-
-        Returns:
-            List of sentiment objects, or ``None`` on failure.
-        """
-        url = self._v4("social-sentiments")
-        params: Dict[str, Any] = {"symbol": symbol}
-        return await self._request("GET", url, params=params)
-
-    async def get_options_chain(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch the full options chain for a ticker.
-
-        Primary endpoint:  ``GET /v4/stock/{ticker}/options``
-        Fallback endpoint: ``GET /v3/stock/{ticker}/options/chain``
-
-        The v4 URL is tried first.  If it returns ``None`` (any failure),
-        the v3 fallback is attempted automatically.
-
-        Note: Options chain data may be incomplete on the FMP Starter plan.
-
-        Args:
-            ticker: Stock symbol, e.g. ``"NVDA"``.
-
-        Returns:
-            List of option contract objects, or ``None`` on failure.
-        """
-        # Primary: v4
-        url_v4 = self._v4(f"stock/{ticker}/options")
-        result = await self._request("GET", url_v4)
-        if result is not None:
-            return result
-
-        # Fallback: v3
-        logger.debug("Options chain v4 returned None for %s — trying v3 fallback", ticker)
-        url_v3 = self._v3(f"stock/{ticker}/options/chain")
-        return await self._request("GET", url_v3)
 
     async def get_cash_flow_statement(
         self,
@@ -367,7 +276,7 @@ class FMPClient:
         Fetch cash flow statements for a symbol.
 
         Endpoint:
-            ``GET /v3/cash-flow-statement/{symbol}?period={period}&limit={limit}``
+            ``GET /stable/cash-flow-statement?symbol={symbol}&period={period}&limit={limit}``
 
         Note: CapEx values are reported as negative numbers in cash flow
         statements.  Callers should apply ``abs()`` when computing magnitudes.
@@ -381,8 +290,8 @@ class FMPClient:
         Returns:
             List of cash flow statement objects, or ``None`` on failure.
         """
-        url = self._v3(f"cash-flow-statement/{symbol}")
-        params: Dict[str, Any] = {"period": period, "limit": limit}
+        url = self._stable("cash-flow-statement")
+        params: Dict[str, Any] = {"symbol": symbol, "period": period, "limit": limit}
         return await self._request("GET", url, params=params)
 
     async def get_income_statement(
@@ -395,7 +304,7 @@ class FMPClient:
         Fetch income statements (revenue, EPS, margins) for a symbol.
 
         Endpoint:
-            ``GET /v3/income-statement/{symbol}?period={period}&limit={limit}``
+            ``GET /stable/income-statement?symbol={symbol}&period={period}&limit={limit}``
 
         Args:
             symbol: Stock symbol, e.g. ``"NVDA"``.
@@ -406,9 +315,145 @@ class FMPClient:
         Returns:
             List of income statement objects, or ``None`` on failure.
         """
-        url = self._v3(f"income-statement/{symbol}")
-        params: Dict[str, Any] = {"period": period, "limit": limit}
+        url = self._stable("income-statement")
+        params: Dict[str, Any] = {"symbol": symbol, "period": period, "limit": limit}
         return await self._request("GET", url, params=params)
+
+    async def get_analyst_estimates(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Fetch analyst EPS and revenue consensus estimates for a ticker.
+
+        Endpoint: ``GET /stable/analyst-estimates?symbol={ticker}&period=annual``
+
+        Note: Only annual estimates are available on the FMP Starter plan.
+
+        Args:
+            ticker: Stock symbol, e.g. ``"NVDA"``.
+
+        Returns:
+            List of estimate objects, or ``None`` on failure.
+        """
+        url = self._stable("analyst-estimates")
+        params: Dict[str, Any] = {"symbol": ticker, "period": "annual"}
+        return await self._request("GET", url, params=params)
+
+    async def get_earnings_calendar(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Fetch the upcoming earnings calendar.
+
+        Endpoint: ``GET /stable/earnings-calendar``
+
+        Returns:
+            List of calendar entries, or ``None`` on failure.
+        """
+        url = self._stable("earnings-calendar")
+        return await self._request("GET", url)
+
+    # ------------------------------------------------------------------
+    # Public API methods — deprecated / unavailable endpoints
+    #
+    # These methods retain their original signatures so that existing call
+    # sites continue to compile.  Each logs a deprecation warning and
+    # returns None immediately without making any HTTP request.
+    # ------------------------------------------------------------------
+
+    async def get_earnings_surprises(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        DEPRECATED — not available on FMP's stable API.
+
+        The ``/v3/earnings-surprises/{ticker}`` endpoint was removed when FMP
+        migrated to the ``/stable/`` base and has no replacement on the Starter
+        plan.  This method always returns ``None``.
+
+        Args:
+            ticker: Stock symbol, e.g. ``"NVDA"``.
+
+        Returns:
+            Always ``None``.
+        """
+        logger.warning(
+            "get_earnings_surprises(%r) called but this endpoint is no longer available "
+            "on FMP's stable API — returning None",
+            ticker,
+        )
+        return None
+
+    async def get_options_chain(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        DEPRECATED — FMP dropped options chain data entirely from the stable API.
+
+        Both the former ``/v4/stock/{ticker}/options`` and
+        ``/v3/stock/{ticker}/options/chain`` endpoints are unavailable.
+        This method always returns ``None``.
+
+        Args:
+            ticker: Stock symbol, e.g. ``"NVDA"``.
+
+        Returns:
+            Always ``None``.
+        """
+        logger.warning(
+            "get_options_chain(%r) called but FMP dropped options chain data from "
+            "the stable API — returning None",
+            ticker,
+        )
+        return None
+
+    async def get_social_sentiment(self, symbol: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        DEPRECATED — not available on FMP's stable API.
+
+        The former ``/v4/social-sentiments`` endpoint has no replacement on
+        the stable API for the Starter plan.  This method always returns ``None``.
+
+        Args:
+            symbol: Stock symbol, e.g. ``"NVDA"``.
+
+        Returns:
+            Always ``None``.
+        """
+        logger.warning(
+            "get_social_sentiment(%r) called but this endpoint is no longer available "
+            "on FMP's stable API — returning None",
+            symbol,
+        )
+        return None
+
+    async def get_real_time_price(self, ticker: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        DEPRECATED — not confirmed available on FMP's stable API.
+
+        The former ``/v3/stock/full/real-time-price/{ticker}`` endpoint has
+        not been validated on the stable base URL.  This method always returns
+        ``None`` to avoid silent data errors.
+
+        Args:
+            ticker: Stock symbol, e.g. ``"NVDA"``.
+
+        Returns:
+            Always ``None``.
+        """
+        logger.warning(
+            "get_real_time_price(%r) called but this endpoint is not confirmed on "
+            "FMP's stable API — returning None",
+            ticker,
+        )
+        return None
+
+    async def get_market_actives(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        DEPRECATED — endpoint removed and no longer needed.
+
+        The former ``/v3/stock_market/actives`` endpoint is not used by any
+        engine in the current architecture.  This method always returns ``None``.
+
+        Returns:
+            Always ``None``.
+        """
+        logger.warning(
+            "get_market_actives() called but this endpoint has been removed — returning None",
+        )
+        return None
 
     async def get_earning_call_transcript(
         self,
@@ -417,13 +462,15 @@ class FMPClient:
         quarter: int,
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Fetch the earnings call transcript for a specific quarter.
+        DEPRECATED — requires a higher FMP plan than Starter (HTTP 402).
 
-        Endpoint:
-            ``GET /v3/earning_call_transcript/{symbol}?year={year}&quarter={quarter}``
+        The former ``/v3/earning_call_transcript/{symbol}`` endpoint returns
+        HTTP 402 on the Starter plan and has not been validated on the stable
+        base URL.  This method always returns ``None``.
 
-        Note: FMP Starter plan may return summary-only transcripts.  Callers
-        should validate the response content before processing.
+        Note: FMP Starter plan may return summary-only transcripts even on
+        plans where transcripts are nominally available.  Callers should
+        validate the response content before processing.
 
         Args:
             symbol: Stock symbol, e.g. ``"NVDA"``.
@@ -431,8 +478,13 @@ class FMPClient:
             quarter: Fiscal quarter number (1–4).
 
         Returns:
-            List of transcript objects, or ``None`` on failure.
+            Always ``None``.
         """
-        url = self._v3(f"earning_call_transcript/{symbol}")
-        params: Dict[str, Any] = {"year": year, "quarter": quarter}
-        return await self._request("GET", url, params=params)
+        logger.warning(
+            "get_earning_call_transcript(%r, year=%d, quarter=%d) called but this "
+            "endpoint requires a higher FMP plan (402) — returning None",
+            symbol,
+            year,
+            quarter,
+        )
+        return None

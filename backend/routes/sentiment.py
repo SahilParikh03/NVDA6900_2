@@ -2,16 +2,15 @@
 Sentiment routes for the NVDA Earnings War Room.
 
 Endpoints:
-  GET /api/sentiment/      — Processed sentiment analysis (composite score, label, ROC)
-  GET /api/sentiment/news  — Recent NVDA news articles
+  GET /api/sentiment/      — Processed Twitter/X sentiment analysis
+  GET /api/sentiment/news  — Recent NVDA news articles from FMP
 
-The root endpoint resolves raw social sentiment data from the in-memory cache
-or FMP, passes it through the sentiment engine, and returns the processed
-SentimentResult.  The news endpoint calls FMP directly on every request.
+The root endpoint resolves raw tweet data from the in-memory cache or
+SocialData.tools, passes it through the Twitter sentiment engine, and
+returns the processed SentimentResult.
 
-All endpoints degrade gracefully: a 503 is returned when data cannot be
-obtained.  Engine errors are caught and surfaced as 503s so the rest of the
-dashboard keeps working.
+All endpoints degrade gracefully: a 503 is returned when data cannot
+be obtained.
 """
 
 import logging
@@ -20,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from backend.cache import cache
 from backend.config import settings
-from backend.engines.sentiment_engine import process_sentiment, SentimentResult
+from backend.engines.sentiment_engine import process_twitter_sentiment, SentimentResult
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +33,12 @@ _NEWS_LIMIT: int = 50
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-async def _get_raw_sentiment(request: Request) -> list[dict] | None:
+async def _get_tweets(request: Request) -> list[dict] | None:
     """
-    Resolve raw social sentiment data for NVDA, preferring the in-memory cache.
+    Resolve raw NVDA tweets, preferring the in-memory cache.
 
-    Returns the raw FMP social sentiment list, or None when no data is
-    available from either source.
+    Returns the raw tweet list, or None when no data is available
+    from either source.
     """
     cache_key = f"sentiment:{_TICKER}"
     cached = await cache.get(cache_key)
@@ -47,48 +46,48 @@ async def _get_raw_sentiment(request: Request) -> list[dict] | None:
         logger.debug("Sentiment cache hit for %s", _TICKER)
         return cached
 
-    logger.debug("Sentiment cache miss for %s — fetching from FMP", _TICKER)
-    client = request.app.state.fmp_client
+    logger.debug("Sentiment cache miss for %s — fetching from SocialData", _TICKER)
+    client = request.app.state.socialdata_client
 
     try:
-        data = await client.get_social_sentiment(_TICKER)
+        tweets = await client.search_tweets(f"${_TICKER}")
     except Exception:
-        logger.exception("Unexpected error fetching social sentiment for %s from FMP", _TICKER)
+        logger.exception("Unexpected error fetching tweets for %s from SocialData", _TICKER)
         return None
 
-    if data is not None:
-        await cache.set(cache_key, data, ttl=settings.cache_ttl_sentiment)
+    if tweets is not None:
+        await cache.set(cache_key, tweets, ttl=settings.cache_ttl_social)
 
-    return data
+    return tweets
 
 
 # ---------------------------------------------------------------------------
-# GET / — processed sentiment
+# GET / — processed sentiment from Twitter/X
 # ---------------------------------------------------------------------------
 
-@router.get("/", summary="Processed NVDA social sentiment analysis")
+@router.get("/", summary="Processed NVDA social sentiment analysis from Twitter/X")
 async def get_sentiment(request: Request) -> dict:
     """
     Return processed social sentiment analysis for NVDA.
 
     Resolution order:
-      1. Raw sentiment data from in-memory cache (key ``sentiment:NVDA``).
-      2. FMP ``/v4/social-sentiment`` via the shared FMP client.
-      3. Raw data passed to ``process_sentiment()`` from the sentiment engine.
+      1. Raw tweet data from in-memory cache (key ``sentiment:NVDA``).
+      2. SocialData.tools Twitter search via the shared SocialDataClient.
+      3. Raw tweets passed to ``process_twitter_sentiment()`` from the engine.
 
     The engine handles empty data gracefully by returning neutral defaults,
     so a 503 is only raised when no raw data can be obtained at all.
 
     Raises:
-        HTTPException(503): When both the cache and FMP return no data,
+        HTTPException(503): When both the cache and SocialData return no data,
                             or when the sentiment engine raises an unexpected
                             exception.
     """
-    raw_data = await _get_raw_sentiment(request)
+    tweets = await _get_tweets(request)
 
-    if raw_data is None:
+    if tweets is None:
         logger.error(
-            "Sentiment endpoint: raw data unavailable for %s — cache miss and FMP returned None",
+            "Sentiment endpoint: tweet data unavailable for %s — cache miss and SocialData returned None",
             _TICKER,
         )
         raise HTTPException(
@@ -97,10 +96,10 @@ async def get_sentiment(request: Request) -> dict:
         )
 
     try:
-        result: SentimentResult = await process_sentiment(raw_data)
+        result: SentimentResult = await process_twitter_sentiment(tweets)
     except Exception:
         logger.exception(
-            "Sentiment engine raised an unexpected exception for %s", _TICKER
+            "Twitter sentiment engine raised an unexpected exception for %s", _TICKER
         )
         raise HTTPException(
             status_code=503,
@@ -111,17 +110,13 @@ async def get_sentiment(request: Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# GET /news — recent NVDA news
+# GET /news — recent NVDA news (still from FMP — working endpoint)
 # ---------------------------------------------------------------------------
 
 @router.get("/news", summary="Recent NVDA news articles")
 async def get_news(request: Request) -> dict:
     """
-    Return the most recent NVDA news articles.
-
-    Calls FMP ``/v3/stock_news`` directly on every request with a limit of
-    50 articles.  News is intentionally not cached at the route layer because
-    freshness is critical and the scheduler manages any background prefetching.
+    Return the most recent NVDA news articles from FMP.
 
     Raises:
         HTTPException(503): When FMP returns no data.

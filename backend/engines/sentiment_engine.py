@@ -28,6 +28,8 @@ ROC direction
 """
 
 import logging
+import math
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -238,6 +240,270 @@ async def process_sentiment(
         _sentiment_label(score),
         roc,
         volume_spike,
+    )
+
+    return SentimentResult(
+        current_score=round(score, 2),
+        sentiment_label=_sentiment_label(score),
+        rate_of_change=round(roc, 6),
+        roc_direction=_roc_direction(roc),
+        mention_volume_today=mentions_today,
+        mention_volume_7d_avg=round(avg_7d_mentions, 2),
+        volume_spike=volume_spike,
+        history=history,
+        last_updated=now_utc,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Twitter / SocialData.tools helpers
+# ---------------------------------------------------------------------------
+
+# Keyword sets for basic polarity scoring
+_BULLISH_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "bullish",
+        "buy",
+        "long",
+        "calls",
+        "moon",
+        "rocket",
+        "up",
+        "beat",
+        "crush",
+        "strong",
+        "breakout",
+        "higher",
+    }
+)
+
+_BEARISH_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "bearish",
+        "sell",
+        "short",
+        "puts",
+        "crash",
+        "down",
+        "miss",
+        "weak",
+        "dump",
+        "lower",
+        "overvalued",
+    }
+)
+
+
+def _tweet_raw_score(text: str) -> float:
+    """
+    Keyword-based polarity for a single tweet.
+
+    Tokenises *text* to lowercase words and counts bullish vs bearish
+    keyword hits.  Returns a raw integer difference
+    (bullish_count - bearish_count).  Returns 0.0 when *text* is empty.
+    """
+    if not text:
+        return 0.0
+    words: list[str] = text.lower().split()
+    bullish_hits: int = sum(1 for w in words if w in _BULLISH_KEYWORDS)
+    bearish_hits: int = sum(1 for w in words if w in _BEARISH_KEYWORDS)
+    return float(bullish_hits - bearish_hits)
+
+
+def _normalize_tweet_score(raw: float) -> float:
+    """
+    Normalise a raw keyword difference to the [-1, +1] range.
+
+    Uses a simple tanh-based squashing so that a single keyword hit
+    pushes the score to ±0.76 and three hits reaches ±0.995, while
+    zero keywords stays at exactly 0.
+    """
+    return math.tanh(raw)
+
+
+def _tweet_engagement_weight(tweet: dict) -> float:
+    """
+    Engagement weight for a tweet.
+
+    Weight = 1 + log2(1 + likes + retweets).
+    A tweet with zero engagement has weight 1.0 (never drops below that).
+    """
+    likes: int = int(tweet.get("favorite_count") or 0)
+    retweets: int = int(tweet.get("retweet_count") or 0)
+    return 1.0 + math.log2(1.0 + likes + retweets)
+
+
+def _parse_tweet_date(tweet: dict) -> str:
+    """
+    Extract the ISO date string (YYYY-MM-DD) from a tweet's ``created_at``
+    field.  Returns ``"1970-01-01"`` on any parse failure.
+    """
+    raw: str = str(tweet.get("created_at", ""))
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    logger.warning(
+        "_parse_tweet_date: could not parse created_at=%r — defaulting to epoch date",
+        raw,
+    )
+    return "1970-01-01"
+
+
+def _aggregate_tweets_by_day(
+    tweets: list[dict],
+) -> dict[str, dict[str, float]]:
+    """
+    Group tweets by calendar date and compute per-day aggregates.
+
+    Each entry in the returned dict has the shape::
+
+        {
+            "weighted_score_sum": float,   # sum of (score * weight) per tweet
+            "weight_sum":         float,   # sum of engagement weights
+            "count":              float,   # number of tweets that day
+        }
+
+    Keys are ISO date strings (YYYY-MM-DD).
+    """
+    days: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"weighted_score_sum": 0.0, "weight_sum": 0.0, "count": 0.0}
+    )
+
+    for tweet in tweets:
+        date_str: str = _parse_tweet_date(tweet)
+        text: str = str(tweet.get("full_text") or "")
+        raw: float = _tweet_raw_score(text)
+        norm: float = _normalize_tweet_score(raw)
+        weight: float = _tweet_engagement_weight(tweet)
+
+        days[date_str]["weighted_score_sum"] += norm * weight
+        days[date_str]["weight_sum"] += weight
+        days[date_str]["count"] += 1.0
+
+    return dict(days)
+
+
+def _day_sentiment_0_to_1(agg: dict[str, float]) -> float:
+    """
+    Convert a day's aggregate bucket to a sentiment value in [0, 1].
+
+    Weighted average of normalised scores sits in [-1, +1]; map to [0, 1]
+    via ``(avg + 1) / 2``.  Returns 0.5 (neutral) if weight_sum is zero.
+    """
+    weight_sum: float = agg["weight_sum"]
+    if weight_sum == 0.0:
+        return 0.5
+    weighted_avg: float = agg["weighted_score_sum"] / weight_sum
+    return (weighted_avg + 1.0) / 2.0
+
+
+# ---------------------------------------------------------------------------
+# Twitter sentiment engine entry point
+# ---------------------------------------------------------------------------
+async def process_twitter_sentiment(tweets: list[dict]) -> SentimentResult:
+    """
+    Process raw tweet dicts from SocialData.tools into a ``SentimentResult``.
+
+    The function reuses the same composite scoring formula, ROC calculation,
+    volume-spike detection, clamping, and labelling logic as
+    ``process_sentiment``.  Only the *input parsing* and per-day
+    sentiment derivation differ.
+
+    Args:
+        tweets: List of raw tweet dicts as returned by
+                ``SocialDataClient.search_tweets``.  An empty list
+                produces a neutral default result.
+
+    Returns:
+        ``SentimentResult`` with composite score, label, ROC, and history.
+    """
+    now_utc: str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # --- Edge case: no tweets ---
+    if not tweets:
+        logger.info(
+            "process_twitter_sentiment: received empty tweet list — returning neutral defaults"
+        )
+        return SentimentResult(
+            current_score=0.0,
+            sentiment_label="Neutral",
+            rate_of_change=0.0,
+            roc_direction="stable",
+            mention_volume_today=0,
+            mention_volume_7d_avg=0.0,
+            volume_spike=False,
+            history=[],
+            last_updated=now_utc,
+        )
+
+    # --- Aggregate tweets by calendar day ---
+    day_buckets: dict[str, dict[str, float]] = _aggregate_tweets_by_day(tweets)
+
+    # Sort dates descending (most recent first), cap to SENTIMENT_DAYS
+    sorted_dates: list[str] = sorted(day_buckets.keys(), reverse=True)[:SENTIMENT_DAYS]
+
+    # --- Today (index 0) ---
+    today_date: str = sorted_dates[0]
+    today_agg: dict[str, float] = day_buckets[today_date]
+    avg_today: float = _day_sentiment_0_to_1(today_agg)
+    mentions_today: int = int(today_agg["count"])
+
+    # --- ROC vs yesterday (index 1) ---
+    roc: float = 0.0
+    if len(sorted_dates) >= 2:
+        yesterday_date: str = sorted_dates[1]
+        avg_yesterday: float = _day_sentiment_0_to_1(day_buckets[yesterday_date])
+        if avg_yesterday == 0.0:
+            logger.debug(
+                "process_twitter_sentiment: avg_yesterday == 0, ROC set to 0.0"
+            )
+            roc = 0.0
+        else:
+            roc = (avg_today - avg_yesterday) / abs(avg_yesterday)
+    else:
+        logger.info(
+            "process_twitter_sentiment: only 1 day of data available — ROC set to 0.0"
+        )
+
+    # --- 7-day average mention volume (includes today) ---
+    all_counts: list[int] = [
+        int(day_buckets[d]["count"]) for d in sorted_dates
+    ]
+    avg_7d_mentions: float = sum(all_counts) / len(all_counts) if all_counts else 0.0
+
+    # Volume spike guard
+    volume_spike: bool = (
+        avg_7d_mentions > 0.0
+        and mentions_today > VOLUME_SPIKE_MULTIPLIER * avg_7d_mentions
+    )
+
+    # --- Composite score ---
+    score: float = _composite_score(avg_today, roc, volume_spike)
+
+    # --- Historical rows (all days except today), oldest first ---
+    history: list[SentimentDay] = []
+    for date_str in reversed(sorted_dates[1:]):
+        agg: dict[str, float] = day_buckets[date_str]
+        day_avg: float = _day_sentiment_0_to_1(agg)
+        day_mentions: int = int(agg["count"])
+        day_score: float = _composite_score(day_avg, 0.0, False)
+        history.append(
+            SentimentDay(
+                date=date_str,
+                score=round(day_score, 2),
+                mentions=day_mentions,
+            )
+        )
+
+    logger.info(
+        "process_twitter_sentiment: score=%.1f label=%s roc=%.4f spike=%s tweets=%d",
+        score,
+        _sentiment_label(score),
+        roc,
+        volume_spike,
+        len(tweets),
     )
 
     return SentimentResult(

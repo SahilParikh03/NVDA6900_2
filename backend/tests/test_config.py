@@ -20,8 +20,10 @@ class TestSettings:
         """Test that missing FMP_API_KEY raises ValidationError."""
         monkeypatch.delenv("FMP_API_KEY", raising=False)
         with pytest.raises(ValidationError) as exc_info:
-            Settings()
-        
+            # _env_file=None prevents pydantic-settings from reading .env,
+            # isolating the test to os.environ only.
+            Settings(_env_file=None)
+
         errors = exc_info.value.errors()
         assert len(errors) > 0
         assert any(err["loc"] == ("fmp_api_key",) for err in errors)
