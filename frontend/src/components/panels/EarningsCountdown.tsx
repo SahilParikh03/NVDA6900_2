@@ -35,7 +35,7 @@ function padTwo(n: number): string {
 }
 
 function formatDate(dateStr: string): string {
-  const date = new Date(dateStr + 'T16:20:00')
+  const date = new Date(dateStr + 'T17:00:00-05:00')
   return date.toLocaleDateString('en-US', {
     weekday: 'short',
     month: 'short',
@@ -70,10 +70,10 @@ function EarningsCountdown() {
 
   const [timeRemaining, setTimeRemaining] = useState<TimeRemaining | null>(null)
 
-  // Assume earnings release at 4:20 PM ET (after market close)
+  // Earnings release: 2:00 PM PT / 5:00 PM ET (right after NYSE close)
   const earningsDate = useMemo(() => {
     if (!data?.date) return null
-    return new Date(data.date + 'T16:20:00-05:00')
+    return new Date(data.date + 'T17:00:00-05:00')
   }, [data?.date])
 
   useEffect(() => {

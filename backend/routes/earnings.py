@@ -26,6 +26,26 @@ router = APIRouter()
 
 _TICKER: str = "NVDA"
 
+# Hardcoded NVDA earnings date — FMP calendar often omits NVDA from its
+# 4,000-entry dump.  This guarantees the countdown always has a target.
+_NVDA_EARNINGS_FALLBACK: dict = {
+    "date": "2026-02-25",
+    "symbol": "NVDA",
+    "eps": None,
+    "epsEstimated": None,
+    "revenue": None,
+    "revenueEstimated": None,
+}
+
+
+def _ensure_nvda_in_calendar(calendar: list[dict]) -> list[dict]:
+    """If NVDA is missing from the FMP earnings calendar, inject the
+    hardcoded fallback entry so the frontend countdown always works."""
+    if any(entry.get("symbol") == _TICKER for entry in calendar):
+        return calendar
+    logger.info("NVDA not found in FMP earnings calendar — injecting fallback entry")
+    return [_NVDA_EARNINGS_FALLBACK, *calendar]
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -149,8 +169,19 @@ async def get_earnings(request: Request) -> dict:
             detail="Earnings data temporarily unavailable. Please retry shortly.",
         )
 
+    # The consolidated endpoint returns a single NVDA calendar entry (not
+    # the full list) to match the frontend EarningsConsolidated type.
+    if calendar is not None:
+        calendar = _ensure_nvda_in_calendar(calendar)
+        nvda_entry = next(
+            (e for e in calendar if e.get("symbol") == _TICKER),
+            _NVDA_EARNINGS_FALLBACK,
+        )
+    else:
+        nvda_entry = _NVDA_EARNINGS_FALLBACK
+
     return {
-        "calendar": calendar,
+        "calendar": nvda_entry,
         "estimates": estimates,
         "surprises": surprises,
     }
@@ -168,6 +199,7 @@ async def get_earnings_calendar(request: Request) -> dict:
     Resolution order:
       1. In-memory cache (key ``earnings:calendar``).
       2. FMP API via the shared FMP client.
+      3. Hardcoded NVDA fallback if NVDA is missing from FMP data.
 
     Raises:
         HTTPException(503): When both the cache and FMP return no data.
@@ -175,13 +207,14 @@ async def get_earnings_calendar(request: Request) -> dict:
     data = await _get_calendar(request)
 
     if data is None:
-        logger.error("Earnings calendar endpoint: data unavailable")
-        raise HTTPException(
-            status_code=503,
-            detail="Earnings calendar data temporarily unavailable. Please retry shortly.",
+        # Even if FMP is completely down, return the hardcoded NVDA entry
+        # so the countdown still works.
+        logger.warning(
+            "Earnings calendar data unavailable from FMP — returning hardcoded NVDA fallback"
         )
+        return {"data": [_NVDA_EARNINGS_FALLBACK]}
 
-    return {"data": data}
+    return {"data": _ensure_nvda_in_calendar(data)}
 
 
 # ---------------------------------------------------------------------------
