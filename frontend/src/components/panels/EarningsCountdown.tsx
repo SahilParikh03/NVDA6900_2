@@ -1,7 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
 import GlassPanel from '../ui/GlassPanel'
-import LoadingSkeleton from '../ui/LoadingSkeleton'
-import ErrorState from '../ui/ErrorState'
 import usePolling from '../../hooks/usePolling'
 import { fetchEarningsCalendar } from '../../api/client'
 import type { EarningsCalendarEntry } from '../../types/api'
@@ -62,19 +60,32 @@ function CountdownUnit({ value, label }: CountdownUnitProps) {
   )
 }
 
+// Hardcoded NVDA earnings: Feb 25 2026, 2:00 PM PT / 5:00 PM ET
+const NVDA_EARNINGS_FALLBACK: EarningsCalendarEntry = {
+  date: '2026-02-25',
+  symbol: 'NVDA',
+  eps: null,
+  epsEstimated: null,
+  revenue: null,
+  revenueEstimated: null,
+}
+
 function EarningsCountdown() {
-  const { data, error, isLoading } = usePolling<EarningsCalendarEntry | null>(
+  const { data: apiData } = usePolling<EarningsCalendarEntry | null>(
     fetchEarningsCalendar,
     { interval: 86400000 }
   )
+
+  // Use API data if available, otherwise fall back to the hardcoded date
+  // so the countdown always renders regardless of API status.
+  const data = apiData ?? NVDA_EARNINGS_FALLBACK
 
   const [timeRemaining, setTimeRemaining] = useState<TimeRemaining | null>(null)
 
   // Earnings release: 2:00 PM PT / 5:00 PM ET (right after NYSE close)
   const earningsDate = useMemo(() => {
-    if (!data?.date) return null
     return new Date(data.date + 'T17:00:00-05:00')
-  }, [data?.date])
+  }, [data.date])
 
   useEffect(() => {
     if (!earningsDate) return
@@ -88,34 +99,6 @@ function EarningsCountdown() {
 
     return () => clearInterval(interval)
   }, [earningsDate])
-
-  if (isLoading && !data) {
-    return (
-      <GlassPanel title="EARNINGS COUNTDOWN">
-        <LoadingSkeleton variant="line" lines={3} />
-      </GlassPanel>
-    )
-  }
-
-  if (error && !data) {
-    return (
-      <GlassPanel title="EARNINGS COUNTDOWN">
-        <ErrorState message="Failed to load earnings calendar" />
-      </GlassPanel>
-    )
-  }
-
-  if (!isLoading && !data) {
-    return (
-      <GlassPanel title="EARNINGS COUNTDOWN">
-        <div className="flex flex-col items-center gap-2 py-4">
-          <span className="text-xs uppercase tracking-wider text-text-muted">
-            No upcoming NVDA earnings date available
-          </span>
-        </div>
-      </GlassPanel>
-    )
-  }
 
   // Earnings date has passed
   const isPast = timeRemaining !== null && timeRemaining.total <= 0
