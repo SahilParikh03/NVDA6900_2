@@ -196,21 +196,35 @@ class FMPClient:
 
     async def get_quotes(self, tickers: List[str]) -> Optional[List[Dict[str, Any]]]:
         """
-        Fetch real-time quote data for multiple tickers in a single call.
+        Fetch real-time quote data for multiple tickers in parallel.
 
-        Endpoint: ``GET /stable/quote?symbol={comma_separated}``
+        Each ticker is fetched individually via :meth:`get_quote` because
+        FMP's stable API does not support comma-separated batch requests.
 
         Args:
             tickers: List of stock symbols, e.g. ``["GOOGL", "MSFT", "AAPL"]``.
 
         Returns:
-            List of quote objects (one per ticker), or ``None`` on failure.
+            Flat list of quote objects (one per successful ticker), or
+            ``None`` if every individual request failed.
         """
         if not tickers:
             return []
-        url = self._stable("quote")
-        params: Dict[str, Any] = {"symbol": ",".join(tickers)}
-        return await self._request("GET", url, params=params)
+
+        results = await asyncio.gather(*(self.get_quote(t) for t in tickers))
+
+        quotes: List[Dict[str, Any]] = []
+        for result in results:
+            if result and len(result) > 0:
+                quotes.append(result[0])
+
+        logger.debug(
+            "get_quotes: fetched %d/%d symbols successfully",
+            len(quotes),
+            len(tickers),
+        )
+
+        return quotes if quotes else None
 
     async def get_historical_price(self, ticker: str) -> Optional[Dict[str, Any]]:
         """

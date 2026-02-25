@@ -1,9 +1,9 @@
 import { useCallback } from 'react'
-import { fetchPrice } from '../../api/client'
+import { fetchPrice, fetchCorrelatedPrices } from '../../api/client'
 import usePolling from '../../hooks/usePolling'
 import { GlassPanel, LoadingSkeleton, ErrorState, LastUpdated } from '../ui'
 
-// TODO: extend /api/price endpoint for multi-symbol support
+import type { PriceQuote } from '../../types/api'
 
 interface TickerCategory {
   label: string
@@ -38,7 +38,7 @@ const CATEGORIES: TickerCategory[] = [
     label: 'MANUFACTURING',
     tickers: [
       { symbol: 'TSM' },
-      { symbol: '005930.KS', displayName: 'Samsung' },
+      { symbol: 'SSNLF', displayName: 'Samsung' },
     ],
   },
   {
@@ -111,6 +111,12 @@ function TickerDashboard() {
     interval: 5000,
   })
 
+  const correlatedFetcher = useCallback(() => fetchCorrelatedPrices(), [])
+  const { data: correlatedPrices } = usePolling<Record<string, PriceQuote>>(
+    correlatedFetcher,
+    { interval: 30000 },
+  )
+
   if (isLoading) {
     return (
       <GlassPanel title="AI ECOSYSTEM">
@@ -145,9 +151,13 @@ function TickerDashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {category.tickers.map((ticker) => {
                 const isNvda = ticker.symbol === 'NVDA'
-                const price = isNvda && nvdaPrice ? nvdaPrice.price : null
-                const changePercent =
-                  isNvda && nvdaPrice ? nvdaPrice.changePercentage : null
+                const correlated = !isNvda ? correlatedPrices?.[ticker.symbol] : undefined
+                const price = isNvda && nvdaPrice
+                  ? nvdaPrice.price
+                  : correlated?.price ?? null
+                const changePercent = isNvda && nvdaPrice
+                  ? nvdaPrice.changePercentage
+                  : correlated?.changePercentage ?? null
 
                 return (
                   <TickerCardInline

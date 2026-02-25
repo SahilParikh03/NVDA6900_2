@@ -1,10 +1,7 @@
-import { useState, useCallback } from 'react'
 import GlassPanel from '../ui/GlassPanel'
 import AlertBanner from '../ui/AlertBanner'
 
-// TODO: wire alert detection logic — compare current vs previous tick for >1% moves
-
-interface Alert {
+export interface Alert {
   id: string
   message: string
   type: 'positive' | 'negative'
@@ -14,17 +11,11 @@ interface Alert {
 
 const MAX_ALERTS = 10
 
-function AlertFeed() {
-  const [alerts, setAlerts] = useState<Alert[]>([])
+interface AlertFeedProps {
+  alerts: Alert[]
+}
 
-  const handleDismiss = useCallback((alertId: string) => {
-    setAlerts((prev) => prev.filter((a) => a.id !== alertId))
-  }, [])
-
-  // Expose for future use: add an alert programmatically
-  // This is not wired yet — see TODO above
-  void handleDismiss
-
+function AlertFeed({ alerts }: AlertFeedProps) {
   const visibleAlerts = alerts.slice(0, MAX_ALERTS)
 
   return (
@@ -62,7 +53,6 @@ function AlertFeed() {
               message={`[${alert.ticker}] ${alert.message}`}
               type={alert.type}
               timestamp={alert.timestamp}
-              onDismiss={() => handleDismiss(alert.id)}
             />
           ))}
         </div>

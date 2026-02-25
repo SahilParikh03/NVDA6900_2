@@ -3,8 +3,13 @@ import PredictionsPanel from '../panels/PredictionsPanel'
 import EarningsCountdown from '../panels/EarningsCountdown'
 import CorrelatedTickers from '../panels/CorrelatedTickers'
 import AlertFeed from '../panels/AlertFeed'
+import type { Alert } from '../panels/AlertFeed'
 
-function NVDACommandTab() {
+interface NVDACommandTabProps {
+  alerts: Alert[]
+}
+
+function NVDACommandTab({ alerts }: NVDACommandTabProps) {
   return (
     <div className="flex flex-col gap-6">
       {/* Row 1: Hero price — full width */}
@@ -29,7 +34,7 @@ function NVDACommandTab() {
 
       {/* Row 4: Alert feed — full width */}
       <div className="animate-fade-in stagger-5">
-        <AlertFeed />
+        <AlertFeed alerts={alerts} />
       </div>
     </div>
   )

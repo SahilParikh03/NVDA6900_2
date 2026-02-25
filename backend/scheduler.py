@@ -14,6 +14,7 @@ from backend.cache import cache
 from backend.config import settings
 from backend.fmp_client import FMPClient
 from backend.polymarket_client import PolymarketClient
+from backend.routes.price import _CORRELATED_SYMBOLS
 from backend.socialdata_client import SocialDataClient
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,7 @@ class DataRefreshScheduler:
         """Refresh batch quotes for correlated tickers."""
         logger.debug("Refreshing correlated prices")
 
-        symbols = ["GOOGL", "MSFT", "AAPL", "AMZN", "META", "AMD", "INTC", "TSM"]
+        symbols = _CORRELATED_SYMBOLS
         try:
             quotes = await self.fmp_client.get_quotes(symbols)
             if quotes:
