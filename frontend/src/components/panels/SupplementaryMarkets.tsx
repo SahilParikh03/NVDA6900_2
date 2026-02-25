@@ -16,7 +16,7 @@ interface MarketCardProps {
 }
 
 function MarketCard({ market, index }: MarketCardProps) {
-  const probabilityPct = market.probability * 100
+  const probabilityPct = market.yes_price * 100
 
   return (
     <div
@@ -25,7 +25,7 @@ function MarketCard({ market, index }: MarketCardProps) {
       {/* Category badge */}
       <div className="flex items-center justify-between">
         <span className="inline-block rounded-full bg-green-dim px-2.5 py-0.5 font-display text-[9px] uppercase tracking-wider text-nvda-green">
-          {market.category}
+          MARKET
         </span>
       </div>
 
@@ -58,13 +58,10 @@ function MarketCard({ market, index }: MarketCardProps) {
         />
       </div>
 
-      {/* Volume + Liquidity */}
+      {/* Volume */}
       <div className="flex items-center gap-4 text-text-muted">
         <span className="font-data text-[10px]">
           Vol {formatVolume(market.volume)}
-        </span>
-        <span className="font-data text-[10px]">
-          Liq {formatVolume(market.liquidity)}
         </span>
       </div>
     </div>
@@ -94,12 +91,12 @@ function SupplementaryMarketsPanel() {
       {!isLoading && !error && data && (
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {data.markets.map((market, idx) => (
+            {data.supplementary.map((market, idx) => (
               <MarketCard key={market.question} market={market} index={idx} />
             ))}
           </div>
 
-          {data.markets.length === 0 && (
+          {data.supplementary.length === 0 && (
             <p className="font-body text-sm text-text-muted text-center py-8">
               No supplementary markets available
             </p>

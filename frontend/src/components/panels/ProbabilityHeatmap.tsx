@@ -79,9 +79,9 @@ function ProbabilityHeatmap() {
 
       {!isLoading && !error && data && (
         <HeatmapChart
-          markets={data.markets}
-          expectedLevel={data.expected_level}
-          maxConviction={data.max_conviction}
+          markets={data.price_levels}
+          expectedLevel={data.key_levels?.fifty_percent_level ?? 0}
+          maxConviction={data.key_levels?.max_conviction ?? 0}
           lastUpdated={lastUpdated}
         />
       )}
@@ -104,11 +104,11 @@ function HeatmapChart({
 }: HeatmapChartProps) {
   const chartData: ChartDatum[] = markets
     .slice()
-    .sort((a, b) => a.strike_price - b.strike_price)
+    .sort((a, b) => a.strike - b.strike)
     .map((m) => ({
-      strike: `$${m.strike_price}`,
-      strikeNum: m.strike_price,
-      probability: m.probability * 100,
+      strike: `$${m.strike}`,
+      strikeNum: m.strike,
+      probability: m.yes_price * 100,
       question: m.question,
       volume: m.volume,
       liquidity: m.liquidity,

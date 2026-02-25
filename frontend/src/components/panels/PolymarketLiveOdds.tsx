@@ -68,15 +68,15 @@ function MarketCard({ market }: { market: PolymarketMarket }) {
 
       <div className="flex items-center gap-3">
         <span
-          className={`font-data text-xl font-bold tabular-nums ${probabilityColor(market.probability)}`}
+          className={`font-data text-xl font-bold tabular-nums ${probabilityColor(market.yes_price)}`}
         >
-          {formatProbability(market.probability)}
+          {formatProbability(market.yes_price)}
         </span>
 
         <div className="relative flex-1 h-2 overflow-hidden rounded-full bg-surface">
           <div
-            className={`absolute inset-y-0 left-0 rounded-full transition-all duration-700 ${probabilityBarColor(market.probability)}`}
-            style={{ width: `${market.probability * 100}%` }}
+            className={`absolute inset-y-0 left-0 rounded-full transition-all duration-700 ${probabilityBarColor(market.yes_price)}`}
+            style={{ width: `${market.yes_price * 100}%` }}
           />
         </div>
       </div>
@@ -98,9 +98,9 @@ function SupplementaryCard({ market }: { market: SupplementaryMarket }) {
     <div className="glass-panel-inner p-3">
       <div className="mb-2 flex items-center gap-2">
         <span
-          className={`rounded-full border px-2 py-0.5 font-display text-[9px] uppercase tracking-wider ${categoryBadgeClass(market.category)}`}
+          className={`rounded-full border px-2 py-0.5 font-display text-[9px] uppercase tracking-wider ${categoryBadgeClass('supplementary')}`}
         >
-          {market.category}
+          SUPPLEMENTARY
         </span>
       </div>
 
@@ -113,15 +113,15 @@ function SupplementaryCard({ market }: { market: SupplementaryMarket }) {
 
       <div className="flex items-center gap-3">
         <span
-          className={`font-data text-lg font-bold tabular-nums ${probabilityColor(market.probability)}`}
+          className={`font-data text-lg font-bold tabular-nums ${probabilityColor(market.yes_price)}`}
         >
-          {formatProbability(market.probability)}
+          {formatProbability(market.yes_price)}
         </span>
 
         <div className="relative flex-1 h-1.5 overflow-hidden rounded-full bg-surface">
           <div
-            className={`absolute inset-y-0 left-0 rounded-full transition-all duration-700 ${probabilityBarColor(market.probability)}`}
-            style={{ width: `${market.probability * 100}%` }}
+            className={`absolute inset-y-0 left-0 rounded-full transition-all duration-700 ${probabilityBarColor(market.yes_price)}`}
+            style={{ width: `${market.yes_price * 100}%` }}
           />
         </div>
       </div>
@@ -129,9 +129,6 @@ function SupplementaryCard({ market }: { market: SupplementaryMarket }) {
       <div className="mt-1.5 flex items-center gap-3">
         <span className="font-data text-[10px] text-text-muted">
           Vol: {formatVolume(market.volume)}
-        </span>
-        <span className="font-data text-[10px] text-text-muted">
-          Liq: {formatVolume(market.liquidity)}
         </span>
       </div>
     </div>
@@ -175,31 +172,31 @@ function PolymarketLiveOdds() {
         <div className="flex flex-1 flex-col gap-4 min-h-0">
           <div className="flex-1 space-y-3 overflow-y-auto max-h-[600px] pr-1">
             {/* Heatmap markets */}
-            {heatmapData && heatmapData.markets.length > 0 && (
+            {heatmapData && heatmapData.price_levels.length > 0 && (
               <div className="space-y-2">
                 <div className="flex items-center gap-3">
                   <span className="font-display text-[10px] uppercase tracking-wider text-text-muted">
                     NVDA Price Markets
                   </span>
-                  {heatmapData.expected_level > 0 && (
+                  {(heatmapData.key_levels?.fifty_percent_level ?? 0) > 0 && (
                     <span className="font-data text-xs text-nvda-green tabular-nums">
-                      Expected: ${heatmapData.expected_level.toFixed(0)}
+                      Expected: ${heatmapData.key_levels.fifty_percent_level.toFixed(0)}
                     </span>
                   )}
                 </div>
-                {heatmapData.markets.map((market) => (
-                  <MarketCard key={market.token_id} market={market} />
+                {heatmapData.price_levels.map((market) => (
+                  <MarketCard key={market.market_id} market={market} />
                 ))}
               </div>
             )}
 
             {/* Supplementary markets */}
-            {suppData && suppData.markets.length > 0 && (
+            {suppData && suppData.supplementary.length > 0 && (
               <div className="space-y-2">
                 <span className="font-display text-[10px] uppercase tracking-wider text-text-muted">
                   Supplementary Markets
                 </span>
-                {suppData.markets.map((market, idx) => (
+                {suppData.supplementary.map((market, idx) => (
                   <SupplementaryCard
                     key={`${market.question}-${idx}`}
                     market={market}
@@ -209,8 +206,8 @@ function PolymarketLiveOdds() {
             )}
 
             {/* Empty state */}
-            {(!heatmapData || heatmapData.markets.length === 0) &&
-              (!suppData || suppData.markets.length === 0) && (
+            {(!heatmapData || heatmapData.price_levels.length === 0) &&
+              (!suppData || suppData.supplementary.length === 0) && (
                 <p className="py-8 text-center font-body text-sm text-text-muted">
                   No active markets
                 </p>

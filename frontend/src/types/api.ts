@@ -59,32 +59,39 @@ export interface PriceChange {
 
 export interface PolymarketMarket {
   question: string;
-  strike_price: number;
-  probability: number;
-  token_id: string;
+  strike: number;
+  yes_price: number;
+  market_id: string;
   volume: number;
+  volume_24h: number;
   liquidity: number;
 }
 
 /** GET /api/options/heatmap */
 export interface PolymarketHeatmap {
-  markets: PolymarketMarket[];
-  expected_level: number;
-  max_conviction: number;
+  price_levels: PolymarketMarket[];
+  key_levels: {
+    max_conviction: number;
+    fifty_percent_level: number;
+    low_conviction: number;
+  };
+  supplementary: SupplementaryMarket[];
+  total_volume: number;
+  market_count: number;
   last_updated: string;
 }
 
 export interface SupplementaryMarket {
   question: string;
-  probability: number;
+  yes_price: number;
   volume: number;
-  liquidity: number;
-  category: string;
+  market_id: string;
 }
 
 /** GET /api/options/supplementary */
 export interface SupplementaryMarkets {
-  markets: SupplementaryMarket[];
+  supplementary: SupplementaryMarket[];
+  market_count: number;
   last_updated: string;
 }
 
