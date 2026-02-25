@@ -43,7 +43,7 @@ const CATEGORIES: TickerCategory[] = [
   },
   {
     label: 'CRYPTO',
-    tickers: [{ symbol: 'BTC-USD', displayName: 'BTC' }],
+    tickers: [{ symbol: 'BTCUSD', displayName: 'BTC' }],
   },
 ]
 

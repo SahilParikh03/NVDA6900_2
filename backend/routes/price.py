@@ -29,7 +29,7 @@ _TICKER: str = "NVDA"
 
 # Correlated tickers tracked alongside NVDA
 _CORRELATED_SYMBOLS: List[str] = [
-    "GOOGL", "MSFT", "AAPL", "AMZN", "META", "AMD", "INTC", "TSM", "SSNLF", "BTC-USD",
+    "GOOGL", "MSFT", "AAPL", "AMZN", "META", "AMD", "INTC", "TSM", "SSNLF", "BTCUSD",
 ]
 
 

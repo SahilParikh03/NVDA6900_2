@@ -16,7 +16,7 @@ const CORRELATED_SYMBOLS = [
   'AMD',
   'INTC',
   'TSM',
-  'BTC-USD',
+  'BTCUSD',
 ] as const
 
 function CorrelatedTickers() {
